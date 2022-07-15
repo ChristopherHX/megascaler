@@ -10,3 +10,7 @@ WIP Autoscaler for self-hosted runners. Currently only provides a runner stub.
 - use both actions/runner and nektos/act worker
 - provide a script to allocate a target enviroment for a job
 - provide a script to execute the worker process on the target enviroment, by forwarding stdin
+
+## Non representative Statistics
+- 68 of 81 jobs have received the wrong runner
+- average time between job start and webhook in_progress is about 60s
