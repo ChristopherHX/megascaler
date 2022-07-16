@@ -13,4 +13,5 @@ WIP Autoscaler for self-hosted runners. Currently only provides a runner stub.
 
 ## Non representative Statistics
 - 68 of 81 jobs have received the wrong runner
-- average time between job start and webhook in_progress is about 60s
+- average time between job start and webhook in_progress is between 1s and 60s
+- webhooks cannot always be delivered, need to add github api polling for reliability if waiting long

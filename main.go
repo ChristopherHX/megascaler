@@ -30,12 +30,16 @@ func (*noSurvey) GetMultiSelectInput(prompt string, options []string) []string {
 	return []string{}
 }
 
+type JobRequest struct {
+	Payload *github.WorkflowJobEvent
+}
+
 type workerData struct {
-	JobID          int64
-	actualJobID    chan int64
-	payload        *github.WorkflowJobEvent
-	cancelListener context.CancelFunc
-	labels         []string
+	JobID              int64
+	ActualJobRequest   chan *JobRequest
+	ExpectedJobRequest *JobRequest
+	cancelListener     context.CancelFunc
+	Settings           *runnerconfiguration.RunnerSettings
 }
 
 type TokenCache struct {
@@ -70,12 +74,14 @@ func (arunner *InMemoryRunner) Remove(fname string) error {
 
 func (arunner *InMemoryRunner) ExecWorker(run *actionsrunner.RunRunner, wc actionsrunner.WorkerContext, jobreq *protocol.AgentJobRequestMessage, src []byte) error {
 	wc.Logger().Log(fmt.Sprintf("%vExpect jobid: %v", time.Now().UTC().Format("2006-01-02T15:04:05.0000000Z "), arunner.Data.JobID))
-	var actualJobid int64
+	var actualJobRequest *JobRequest
 	for {
 		b := false
 		select {
-		case jobid := <-arunner.Data.actualJobID:
-			actualJobid = jobid
+		case <-wc.JobExecCtx().Done():
+			b = true
+		case jobRequest := <-arunner.Data.ActualJobRequest:
+			actualJobRequest = jobRequest
 			b = true
 		case <-time.After(time.Second):
 			wc.Logger().Update()
@@ -85,16 +91,30 @@ func (arunner *InMemoryRunner) ExecWorker(run *actionsrunner.RunRunner, wc actio
 			break
 		}
 	}
-	wc.Logger().Log(fmt.Sprintf("%vGot jobid: %v", time.Now().UTC().Format("2006-01-02T15:04:05.0000000Z "), actualJobid))
-	wc.Logger().Log(fmt.Sprintf("Labels: %v", arunner.Data.payload.WorkflowJob.Labels))
-	wc.Logger().Log("Event:")
-	b, _ := json.MarshalIndent(arunner.Data.payload, "", "  ")
-	wc.Logger().Log(string(b))
+	if actualJobRequest != nil {
+		wc.Logger().Log(fmt.Sprintf("%vGot jobid: %v", time.Now().UTC().Format("2006-01-02T15:04:05.0000000Z "), actualJobRequest.Payload.WorkflowJob.ID))
+		wc.Logger().Log(fmt.Sprintf("Labels: %v", actualJobRequest.Payload.WorkflowJob.Labels))
+		wc.Logger().Log("Event:")
+		b, _ := json.MarshalIndent(actualJobRequest.Payload, "", "  ")
+		wc.Logger().Log(string(b))
+	}
 	wc.Logger().Current().Complete("Succeeded")
 	wc.Logger().Append(protocol.CreateTimelineEntry(wc.Message().JobID, "__echo", "Echo Hello World"))
 	wc.Logger().MoveNext()
 	wc.Logger().Log("This is my logger")
 	wc.Logger().Log("Hello World")
+	for i := 0; i < 200; i++ {
+		b := false
+		select {
+		case <-wc.JobExecCtx().Done():
+			b = true
+		case <-time.After(time.Second):
+			wc.Logger().Log(fmt.Sprintf("%v Dummy work %v", time.Now().UTC().Format("2006-01-02T15:04:05.0000000Z "), i))
+		}
+		if b {
+			break
+		}
+	}
 	wc.Logger().Current().Complete("Succeeded")
 	wc.Logger().MoveNext()
 	wc.Logger().Logger.Close()
@@ -106,6 +126,28 @@ func (arunner *InMemoryRunner) ExecWorker(run *actionsrunner.RunRunner, wc actio
 		},
 	})
 	return nil //fmt.Errorf("Not implemented")
+}
+
+func equalFoldSubSet(left []string, right []string) bool {
+	for _, l := range left {
+		found := false
+		for _, r := range right {
+			if strings.EqualFold(l, r) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+func equalFoldSet(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	return equalFoldSubSet(left, right) && equalFoldSubSet(right, left)
 }
 
 func (s *GitHubEventMonitor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -121,70 +163,7 @@ func (s *GitHubEventMonitor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case *github.WorkflowJobEvent:
 		if strings.EqualFold(event.GetAction(), "queued") {
 			fmt.Println("config runner")
-			job := event.GetWorkflowJob()
-			conf := &runnerconfiguration.ConfigureRunner{}
-			conf.Unattended = true
-			conf.Labels = job.Labels
-			conf.Name = uuid.NewString()
-			wd := &workerData{
-				JobID:       job.GetID(),
-				actualJobID: make(chan int64),
-				labels:      job.Labels,
-			}
-			var listenerctx context.Context
-			listenerctx, wd.cancelListener = context.WithCancel(context.Background())
-
-			s.byWorkerName.Store(conf.Name, wd)
-			s.byJobID.Store(job.GetID(), wd)
-			conf.NoDefaultLabels = true
-
-			conf.URL = event.GetRepo().GetHTMLURL()
-			conf.Pat = os.Getenv("GITHUB_PAT")
-			conf.Ephemeral = true
-			rtc, _ := s.tokenCache.LoadOrStore(conf.URL, &TokenCache{})
-			cl := &http.Client{}
-			tc := rtc.(*TokenCache)
-			var settings *runnerconfiguration.RunnerSettings
-			auth := tc.GithubAuth
-			if auth != nil {
-				csettings, err := conf.Configure(&runnerconfiguration.RunnerSettings{}, &noSurvey{}, auth)
-				if err == nil {
-					fmt.Println("Successfully reused short lived auth")
-					settings = csettings
-				}
-			}
-			if settings == nil {
-				func() {
-					tc.Lock.Lock()
-					defer tc.Lock.Unlock()
-					if len(tc.RunnerToken) > 0 {
-						conf.Token = tc.RunnerToken
-						auth, err = conf.Authenicate(cl, &noSurvey{})
-					} else {
-						err = fmt.Errorf("not cached")
-					}
-					if err == nil {
-						fmt.Println("Successfully reused runner token")
-						tc.GithubAuth = auth
-						settings, _ = conf.Configure(&runnerconfiguration.RunnerSettings{}, &noSurvey{}, auth)
-					} else {
-						conf.Token = ""
-						auth, _ := conf.Authenicate(cl, &noSurvey{})
-						tc.RunnerToken = conf.Token
-						tc.GithubAuth = auth
-						settings, _ = conf.Configure(&runnerconfiguration.RunnerSettings{}, &noSurvey{}, auth)
-					}
-				}()
-			}
-
-			we := &InMemoryRunner{
-				Data: wd,
-			}
-			run := &actionsrunner.RunRunner{
-				Settings: settings,
-				Version:  "megascaler-v0.0.0",
-			}
-			go run.Run(we, listenerctx, context.Background())
+			configureRunner(event, s, nil)
 		} else if strings.EqualFold(event.GetAction(), "in_progress") {
 			fmt.Println("runner in progress")
 			job := event.GetWorkflowJob()
@@ -195,8 +174,6 @@ func (s *GitHubEventMonitor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				e := re.(*workerData)
 				expected = e
 				fmt.Println("runner matched")
-				e.actualJobID <- job.GetID()
-				e.payload = event
 			} else {
 				fmt.Printf("runner not found %v\n", name)
 			}
@@ -205,20 +182,144 @@ func (s *GitHubEventMonitor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				got = e
 				if expected.JobID != got.JobID {
 					fmt.Println("assigned unexpected job")
-					if len(expected.labels) != len(got.labels) {
-						expected.cancelListener()
+					if !equalFoldSet(expected.ExpectedJobRequest.Payload.WorkflowJob.Labels, got.ExpectedJobRequest.Payload.WorkflowJob.Labels) {
+						if equalFoldSubSet(got.ExpectedJobRequest.Payload.WorkflowJob.Labels, expected.ExpectedJobRequest.Payload.WorkflowJob.Labels) {
+							fmt.Println("unexpected job has less labels than expected job, recreate runner")
+							go configureRunner(expected.ExpectedJobRequest.Payload, s, expected)
+						}
 					}
+					go func() {
+						rr := &runnerconfiguration.RemoveRunner{}
+						rr.Pat = os.Getenv("GITHUB_PAT")
+						if got.Settings == nil {
+							<-time.After(time.Second * 30)
+						}
+						if got.Settings != nil {
+							fmt.Printf("Removing runner %v\n", got.Settings.Instances[0].Agent.Name)
+							rtc, _ := s.tokenCache.LoadOrStore(got.Settings.Instances[0].RegistrationURL, &TokenCache{})
+							tc := rtc.(*TokenCache)
+							var err error
+							auth := tc.GithubAuth
+							if auth != nil {
+								_, err = rr.Remove(got.Settings, &noSurvey{}, auth)
+								if err == nil {
+									fmt.Printf("removed with short lived token\n")
+								}
+							} else {
+								err = fmt.Errorf("no cache")
+							}
+							if err != nil && (err.Error() == "no cache" || strings.Contains(err.Error(), "Http DELETE Request finished 401") || strings.Contains(err.Error(), "Http DELETE Request finished 403")) {
+								rr.Token = tc.RunnerToken
+								_, err = rr.Remove(got.Settings, &noSurvey{}, nil)
+								if err != nil && (strings.Contains(err.Error(), "Http DELETE Request finished 401") || strings.Contains(err.Error(), "Http DELETE Request finished 403")) {
+									rr.Token = ""
+									_, err = rr.Remove(got.Settings, &noSurvey{}, nil)
+									if err != nil {
+										fmt.Printf("failed to remove runner: %v\n", err)
+									} else {
+										fmt.Printf("removed with PAT token\n")
+									}
+								} else if err != nil {
+									fmt.Printf("failed to remove runner: %v\n", err)
+								} else {
+									fmt.Printf("removed with runner token\n")
+								}
+							} else if err != nil {
+								fmt.Printf("failed to remove runner: %v\n", err)
+							}
+						} else if err != nil {
+							fmt.Println("can't remove runner, settings not set")
+						}
+					}()
+
+					//got.cancelListener()
+					//expected.cancelListener()
 				} else {
 					fmt.Println("job matched")
 				}
 			} else {
 				fmt.Printf("job not found %v\n", name)
 			}
-
+			expected.ActualJobRequest <- got.ExpectedJobRequest
 		}
-
 	}
 	w.WriteHeader(200)
+}
+
+func configureRunner(event *github.WorkflowJobEvent, s *GitHubEventMonitor, previousData *workerData) {
+	var err error
+	job := event.GetWorkflowJob()
+	conf := &runnerconfiguration.ConfigureRunner{}
+	conf.Unattended = true
+	conf.Labels = job.Labels
+	conf.Name = uuid.NewString()
+	wd := &workerData{
+		JobID: job.GetID(),
+		ExpectedJobRequest: &JobRequest{
+			Payload: event,
+		},
+	}
+	if previousData != nil {
+		wd.ActualJobRequest = previousData.ActualJobRequest
+	} else {
+		wd.ActualJobRequest = make(chan *JobRequest)
+	}
+	var listenerctx context.Context
+	listenerctx, wd.cancelListener = context.WithCancel(context.Background())
+
+	s.byWorkerName.Store(conf.Name, wd)
+	s.byJobID.Store(job.GetID(), wd)
+	conf.NoDefaultLabels = true
+
+	conf.URL = event.GetRepo().GetHTMLURL()
+	conf.Pat = os.Getenv("GITHUB_PAT")
+	conf.Ephemeral = true
+	rtc, _ := s.tokenCache.LoadOrStore(conf.URL, &TokenCache{})
+	cl := &http.Client{}
+	tc := rtc.(*TokenCache)
+	var settings *runnerconfiguration.RunnerSettings
+	auth := tc.GithubAuth
+	if auth != nil {
+		csettings, err := conf.Configure(&runnerconfiguration.RunnerSettings{}, &noSurvey{}, auth)
+		if err == nil {
+			fmt.Println("Successfully reused short lived auth")
+			settings = csettings
+		}
+	}
+	if settings == nil {
+		func() {
+			tc.Lock.Lock()
+			defer tc.Lock.Unlock()
+			if len(tc.RunnerToken) > 0 {
+				conf.Token = tc.RunnerToken
+				auth, err = conf.Authenicate(cl, &noSurvey{})
+			} else {
+				err = fmt.Errorf("not cached")
+			}
+			if err == nil {
+				fmt.Println("Successfully reused runner token")
+				tc.GithubAuth = auth
+				settings, _ = conf.Configure(&runnerconfiguration.RunnerSettings{}, &noSurvey{}, auth)
+			} else {
+				conf.Token = ""
+				auth, _ := conf.Authenicate(cl, &noSurvey{})
+				tc.RunnerToken = conf.Token
+				tc.GithubAuth = auth
+				settings, _ = conf.Configure(&runnerconfiguration.RunnerSettings{}, &noSurvey{}, auth)
+				fmt.Println("Used PAT token")
+			}
+		}()
+	}
+	wd.Settings = settings
+
+	we := &InMemoryRunner{
+		Data: wd,
+	}
+	run := &actionsrunner.RunRunner{
+		Settings: settings,
+		Version:  "megascaler-v0.0.0",
+	}
+	go run.Run(we, listenerctx, context.Background())
 }
 
 func main() {
