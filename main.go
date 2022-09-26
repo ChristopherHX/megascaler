@@ -60,7 +60,8 @@ type GitHubEventMonitor struct {
 
 type InMemoryRunner struct {
 	actionsrunner.ConsoleLogger
-	Data *workerData
+	Data   *workerData
+	Config *Config
 }
 
 func (arunner *InMemoryRunner) WriteJson(path string, value interface{}) error {
@@ -83,6 +84,7 @@ type MegaScalerContextData struct {
 func (arunner *InMemoryRunner) ExecWorker(run *actionsrunner.RunRunner, wc actionsrunner.WorkerContext, jobreq *protocol.AgentJobRequestMessage, src []byte) error {
 	wc.Logger().Log(fmt.Sprintf("%vExpect jobid: %v", time.Now().UTC().Format("2006-01-02T15:04:05.0000000Z "), arunner.Data.JobID))
 	var actualJobRequest *JobRequest
+	queryWebhookTimeout := time.After(5 * time.Minute)
 	for {
 		b := false
 		select {
@@ -91,9 +93,17 @@ func (arunner *InMemoryRunner) ExecWorker(run *actionsrunner.RunRunner, wc actio
 		case jobRequest := <-arunner.Data.ActualJobRequest:
 			actualJobRequest = jobRequest
 			b = true
-		case <-time.After(time.Second):
+		case <-time.After(5 * time.Second):
 			wc.Logger().Update()
 			wc.Logger().Log(fmt.Sprintf("%vStill waiting for webhook", time.Now().UTC().Format("2006-01-02T15:04:05.0000000Z ")))
+		case <-queryWebhookTimeout:
+			wc.Logger().Update()
+			wc.Logger().Log(fmt.Sprintf("%v##[Error]No matching webhook received within 5 Minutes, killing runner", time.Now().UTC().Format("2006-01-02T15:04:05.0000000Z ")))
+			wc.Logger().Current().Complete("Failed")
+			wc.Logger().Update()
+			wc.Logger().TimelineRecords.Value[0].Complete("Failed")
+			wc.Logger().Finish()
+			wc.FinishJob("Failed", &map[string]protocol.VariableValue{})
 		}
 		if b {
 			break
@@ -107,13 +117,14 @@ func (arunner *InMemoryRunner) ExecWorker(run *actionsrunner.RunRunner, wc actio
 		b, _ := json.MarshalIndent(actualJobRequest.Payload, "", "  ")
 		wc.Logger().Log(string(b))
 		we.WorkerArgs = actualJobRequest.WorkerArgs
-	}
-	wc.Logger().Current().Complete("Succeeded")
-	if actualJobRequest == nil {
+		wc.Logger().Current().Complete("Succeeded")
+	} else {
+		wc.Logger().Log(fmt.Sprintf("%v##[Error] Couldn't find", time.Now().UTC().Format("2006-01-02T15:04:05.0000000Z ")))
+		wc.Logger().Current().Complete("Failed")
 		wc.Logger().Logger.Close()
-		wc.Logger().TimelineRecords.Value[0].Complete("Succeeded")
+		wc.Logger().TimelineRecords.Value[0].Complete("Failed")
 		wc.Logger().Finish()
-		wc.FinishJob("Succeeded", &map[string]protocol.VariableValue{})
+		wc.FinishJob("Failed", &map[string]protocol.VariableValue{})
 		return nil
 	}
 	var rawjobreq map[string]interface{}
@@ -122,39 +133,62 @@ func (arunner *InMemoryRunner) ExecWorker(run *actionsrunner.RunRunner, wc actio
 		return err
 	}
 
-	if actualJobRequest != nil {
-		clabels := []protocol.PipelineContextData{}
-		for _, l := range actualJobRequest.Payload.WorkflowJob.Labels {
-			cl := l
-			clabels = append(clabels, protocol.PipelineContextData{
-				StringValue: &cl,
-			})
-		}
-		var dictionary int32 = 2
-		var array int32 = 1
-		var number int32 = 4
-		var jobidfl float64 = float64(*actualJobRequest.Payload.WorkflowJob.ID)
-		rawjobreq["contextData"].(map[string]interface{})["github"].(map[string]interface{})["d"] = append(*jobreq.ContextData["github"].DictionaryValue, protocol.DictionaryContextDataPair{Key: "megascaler", Value: protocol.PipelineContextData{
-			Type: &dictionary,
-			DictionaryValue: &[]protocol.DictionaryContextDataPair{
-				{Key: "labels", Value: protocol.PipelineContextData{
-					Type:       &array,
-					ArrayValue: &clabels,
-				}},
-				{
-					Key: "jobid", Value: protocol.PipelineContextData{
-						Type:        &number,
-						NumberValue: &jobidfl,
-					},
-				},
-			},
-		}})
-		//rawjobreq["contextData"].(map[string]interface{})["megascaler"]
-		// githubCtx := jobreq.ContextData["github"].ToRawObject().(map[string]interface{})
-		// rawgithubctx := &protocol.PipelineContextData{}
-		// rawgithubctx.UnmarshalJSON()
-		// rawjobreq["contextData"].(map[string]interface{})["github"] =
+	clabels := []protocol.PipelineContextData{}
+	for _, l := range actualJobRequest.Payload.WorkflowJob.Labels {
+		cl := l
+		clabels = append(clabels, protocol.PipelineContextData{
+			StringValue: &cl,
+		})
 	}
+	var dictionary int32 = 2
+	var array int32 = 1
+	var number int32 = 4
+	var str int32
+	var jobidfl float64 = float64(*actualJobRequest.Payload.WorkflowJob.ID)
+	megascalerContextData := []protocol.DictionaryContextDataPair{
+		{Key: "labels", Value: protocol.PipelineContextData{
+			Type:       &array,
+			ArrayValue: &clabels,
+		}},
+		{
+			Key: "jobid", Value: protocol.PipelineContextData{
+				Type:        &number,
+				NumberValue: &jobidfl,
+			},
+		},
+	}
+	if len(jobreq.JobDisplayName) > 0 {
+		megascalerContextData = append(megascalerContextData, protocol.DictionaryContextDataPair{
+			Key: "JobDisplayName", Value: protocol.PipelineContextData{
+				Type:        &str,
+				StringValue: &jobreq.JobDisplayName,
+			},
+		})
+	}
+	if len(jobreq.Variables) > 0 {
+		vars := []protocol.DictionaryContextDataPair{}
+		for k, v := range jobreq.Variables {
+			if !v.IsSecret {
+				val := v.Value
+				vars = append(vars, protocol.DictionaryContextDataPair{
+					Key: k, Value: protocol.PipelineContextData{
+						Type:        &str,
+						StringValue: &val,
+					},
+				})
+			}
+		}
+		megascalerContextData = append(megascalerContextData, protocol.DictionaryContextDataPair{
+			Key: "variables", Value: protocol.PipelineContextData{
+				Type:            &dictionary,
+				DictionaryValue: &vars,
+			},
+		})
+	}
+	rawjobreq["contextData"].(map[string]interface{})["github"].(map[string]interface{})["d"] = append(*jobreq.ContextData["github"].DictionaryValue, protocol.DictionaryContextDataPair{Key: "megascaler", Value: protocol.PipelineContextData{
+		Type:            &dictionary,
+		DictionaryValue: &megascalerContextData,
+	}})
 
 	src, err = json.Marshal(rawjobreq)
 	if err != nil {
@@ -378,7 +412,8 @@ func configureRunner(event *github.WorkflowJobEvent, s *GitHubEventMonitor, prev
 	wd.Settings = settings
 
 	we := &InMemoryRunner{
-		Data: wd,
+		Data:   wd,
+		Config: s.Config,
 	}
 	run := &actionsrunner.RunRunner{
 		Settings: settings,
@@ -397,6 +432,7 @@ type Config struct {
 	Secret      string    `yaml:"secret"`
 	Pat         string    `yaml:"pat"`
 	MaxParallel int       `yaml:"max_parallel"`
+	Address     string    `yaml:"address"`
 }
 
 func (config *Config) GetByLabels(labels []string) *Worker {
@@ -412,7 +448,7 @@ func main() {
 	src, _ := os.ReadFile("config.yml")
 	conf := &Config{}
 	yaml.Unmarshal(src, conf)
-	http.ListenAndServe("0.0.0.0:4032", &GitHubEventMonitor{
+	http.ListenAndServe(conf.Address, &GitHubEventMonitor{
 		Config: conf,
 	})
 }
