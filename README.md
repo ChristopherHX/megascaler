@@ -1,6 +1,10 @@
 # megascaler
 WIP Autoscaler for self-hosted runners.
 
+This program will communticate with GitHub to receive job requests and will delegate running the job to a worker program, while the worker program has no access to the runner / PAT tokens if it is spawned in an isolated environment.
+
+Works with both the official https://github.com/actions/runner and the unofficial https://github.com/ChristopherHX/github-act-runner.
+
 ## Known problems
 - you should avoid using multiple labels
   - if you really want to use them always provide an entry for any possible configuration
@@ -29,3 +33,35 @@ WIP Autoscaler for self-hosted runners.
 ## Non representative Statistics
 - 68 of 81 jobs have received the wrong runner
 - average time between job start and webhook in_progress is between 1s and 60s
+
+## Getting started
+
+create a `config.yml`
+```yaml
+worker:                                             # list of worker to spawn if the label list has an exact match
+- labels:
+  - github-act-runner                               # labels to spawn the specfic worker, if this matches what you added to the `runs-on` key this program will spawn a worker
+  args:
+  - /workspaces/megascaler/runner/github-act-runner # Path to https://github.com/ChristopherHX/github-act-runner binary
+  - worker                                          # Execute in worker mode
+- labels:
+  - actions-runner                                  # labels to spawn the specfic worker, if this matches what you added to the `runs-on` key this program will spawn a worker
+  args:                                             # create a `/workspaces/megascaler/runner/.runner` textfile with content `{"workFolder": "_work"}`
+  - pwsh                                            # Path to https://github.com/powershell/powershell binary or add it to your `PATH` env variable
+  - actions-runner-worker.ps1                       # Get the file from https://github.com/ChristopherHX/github-act-runner/blob/main/compat/actions-runner-worker.ps1
+  - /workspaces/megascaler/runner/bin/Runner.Worker # Path to https://github.com/actions/runner binary
+  - worker                                          # Execute in worker mode
+address: 0.0.0.0:9403                               # webhook listener to receive `workflow_job` events from GitHub
+# secret: mysecret                                  # validate the webhook signature to harden the webhook endpoint
+pat: ghp_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX       # GitHub Classic PAT with full `repo` scope
+```
+
+You can also pipe the worker via the `args` list via ssh or other programs, it will connect to GitHub via http and communicates over stdin/stdout.
+
+run
+```
+go build
+./megascaler
+```
+
+or debug `main.go`
