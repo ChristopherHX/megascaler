@@ -50,7 +50,6 @@ worker:                                             # list of worker to spawn if
   - pwsh                                            # Path to https://github.com/powershell/powershell binary or add it to your `PATH` env variable
   - actions-runner-worker.ps1                       # Get the file from https://github.com/ChristopherHX/github-act-runner/blob/main/compat/actions-runner-worker.ps1
   - /workspaces/megascaler/runner/bin/Runner.Worker # Path to https://github.com/actions/runner binary
-  - worker                                          # Execute in worker mode
 address: 0.0.0.0:9403                               # webhook listener to receive `workflow_job` events from GitHub
 # secret: mysecret                                  # validate the webhook signature to harden the webhook endpoint
 pat: ghp_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX       # GitHub Classic PAT with full `repo` scope
