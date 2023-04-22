@@ -157,6 +157,18 @@ func (arunner *InMemoryRunner) ExecWorker(run *actionsrunner.RunRunner, wc actio
 				NumberValue: &jobidfl,
 			},
 		},
+		{
+			Key: "job_url", Value: protocol.PipelineContextData{
+				Type:        &str,
+				StringValue: actualJobRequest.Payload.WorkflowJob.HTMLURL,
+			},
+		},
+		{
+			Key: "run_url", Value: protocol.PipelineContextData{
+				Type:        &str,
+				StringValue: actualJobRequest.Payload.WorkflowJob.RunURL,
+			},
+		},
 	}
 	if len(jobreq.JobDisplayName) > 0 {
 		megascalerContextData = append(megascalerContextData, protocol.DictionaryContextDataPair{

@@ -20,6 +20,8 @@ WIP Autoscaler for self-hosted runners.
 
 ## Extras for actions/runner
 - `${{ github.megascaler.jobid }}` is assigned to the rest api job id
+- `${{ github.megascaler.job_url }}` is assigned to the job html url
+- `${{ github.megascaler.run_url }}` is assigned to the workflow run html url
 - `${{ github.megascaler.labels }}` is assigned to an array of string with all labels from `runs-on` of the current instance
 - `${{ github.megascaler.variables }}` is assigned to the otherwise hidden system variables of Actions
 - `${{ github.megascaler.jobDisplayName }}` is assigned to the otherwise hidden job display name
