@@ -134,16 +134,17 @@ func (arunner *InMemoryRunner) ExecWorker(run *actionsrunner.RunRunner, wc actio
 	}
 
 	clabels := []protocol.PipelineContextData{}
+	var str int32
+	var array int32 = 1
+	var dictionary int32 = 2
+	var number int32 = 4
 	for _, l := range actualJobRequest.Payload.WorkflowJob.Labels {
 		cl := l
 		clabels = append(clabels, protocol.PipelineContextData{
+			Type: &str,
 			StringValue: &cl,
 		})
 	}
-	var dictionary int32 = 2
-	var array int32 = 1
-	var number int32 = 4
-	var str int32
 	var jobidfl float64 = float64(*actualJobRequest.Payload.WorkflowJob.ID)
 	megascalerContextData := []protocol.DictionaryContextDataPair{
 		{Key: "labels", Value: protocol.PipelineContextData{
